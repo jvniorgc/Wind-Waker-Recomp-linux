@@ -176,10 +176,11 @@ endif()
 # The chassis loop hands the chunks' gather-pipe batch (gather_pipe.c) to the
 # host wherever the host looks (dispatch_loop.h).
 target_compile_definitions(${MODULE_NAME} PRIVATE BLUEWAKE_GATHER_PIPE_BATCH=1)
-if(WIN32)
+if(WIN32 OR (UNIX AND NOT APPLE))
   # MEM1 as a global array beside the guest CPU's state (guest_cpu.c,
   # core/cpu.h's BW_GUEST_MEM1): guest registers stay in host registers
   # across guest loads and stores. 32 MiB, the host's linked RAM size.
+  # Windows and Linux (linux/).
   target_compile_definitions(${MODULE_NAME} PRIVATE BW_GUEST_MEM1=bw_guest_mem1
       BW_GUEST_MEM1_SIZE=0x02000000u)
 endif()
@@ -208,6 +209,12 @@ if(WIN32)
       -include "${CMAKE_CURRENT_SOURCE_DIR}/../../windows/compat/bw_getenv_cache.h")
 else()
   target_link_libraries(${MODULE_NAME} PRIVATE m)
+endif()
+if(UNIX AND NOT APPLE)
+  # Linux (linux/): the module is position-independent; its own globals (the
+  # guest CPU, MEM1, the gather pipe) are reached directly, not through the GOT.
+  target_compile_options(${MODULE_NAME} PRIVATE -fno-semantic-interposition)
+  target_link_options(${MODULE_NAME} PRIVATE "LINKER:-Bsymbolic")
 endif()
 target_compile_options(${MODULE_NAME} PRIVATE -O${COMPOSITE_OPTIMIZATION_LEVEL} -ffp-contract=off)
 

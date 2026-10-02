@@ -238,7 +238,8 @@ static void observe(const void* sdl_event, void* user) {
     // Save states: F5 saves, F9 loads the last one (main.c). On Windows F8
     // loads: F9 is the frame rate there (windows/src/win_settings.cpp), and a
     // press meant for it must not take the game back to an older state.
-#if defined(_WIN32)
+// F9 is the frame rate on Windows and Linux (windows/src/win_settings.cpp).
+#if defined(_WIN32) || defined(__linux__)
     const SDL_Scancode load_state_key = SDL_SCANCODE_F8;
 #else
     const SDL_Scancode load_state_key = SDL_SCANCODE_F9;

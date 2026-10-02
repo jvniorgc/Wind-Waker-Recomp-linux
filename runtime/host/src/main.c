@@ -6354,7 +6354,8 @@ static void host_state_parse_requests(void) {
 
 // F5 / F9 from the window's event observer (mouse_camera.c), main thread.
 // The load key is F8 on Windows, where F9 is the frame rate.
-#if defined(_WIN32)
+// F9 is the frame rate on Windows and Linux (windows/src/win_settings.cpp).
+#if defined(_WIN32) || defined(__linux__)
 #define HOST_STATE_LOAD_KEY "F8"
 #else
 #define HOST_STATE_LOAD_KEY "F9"

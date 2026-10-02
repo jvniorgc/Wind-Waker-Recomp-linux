@@ -16,6 +16,7 @@
 // aside, so the menu's clicks and keys do not move Link.
 #include "win_settings.h"
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -24,6 +25,35 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#define BW_SEP "\\"
+#else
+#include <stdlib.h>
+// Linux (linux/CMakeLists.txt builds this file too): the few Windows calls
+// below, by the same names, and the virtual-key codes linux/src/linux_entry.c
+// translates SDL's keys to.
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+extern char** environ;
+#define BW_SEP "/"
+#define MAX_PATH 4096
+#define INVALID_FILE_ATTRIBUTES 0xFFFFFFFFu
+#define VK_RETURN 0x0D
+#define VK_ESCAPE 0x1B
+#define VK_F1 0x70
+#define VK_F9 0x78
+#define VK_F10 0x79
+#define VK_F11 0x7A
+static inline int _putenv_s(const char* name, const char* value) { return setenv(name, value, 1); }
+static inline int CreateDirectoryA(const char* path, void*) { return mkdir(path, 0755) == 0; }
+static inline unsigned GetFileAttributesA(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 ? 0u : INVALID_FILE_ATTRIBUTES;
+}
+static inline int DeleteFileA(const char* path) { return unlink(path) == 0; }
+#endif
 
 #include <SDL3/SDL.h>
 #include <aurora/aurora.h>
@@ -129,7 +159,11 @@ struct Settings {
 Settings g_saved;     // as in the file, changed by the menu and hotkeys
 Settings g_launched;  // as this session started (what a restart would change)
 std::string g_data_dir, g_path;
-std::vector<wchar_t> g_environment;  // as BlueWake was started, for Restart
+#ifdef _WIN32
+std::vector<wchar_t> g_environment;
+#else
+std::vector<std::string> g_environment;
+#endif  // as BlueWake was started, for Restart
 
 bool g_menu_open;
 bool g_toggle_menu, g_toggle_fullscreen;  // from the hotkeys, done in the frame
@@ -234,7 +268,11 @@ void save_file() {
         std::fprintf(f, "option.%s=%d\n", name.c_str(), on);
     const bool ok = std::fclose(f) == 0;
     if (ok)
+#ifdef _WIN32
         MoveFileExA(pending.c_str(), g_path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+#else
+        std::rename(pending.c_str(), g_path.c_str());
+#endif
     g_dirty = false;
 }
 
@@ -262,13 +300,25 @@ double aspect_ratio(const std::string& aspect) {
 // A window a good size for this screen: the tallest multiple of 240 lines that
 // fits in 80 percent of the primary screen's work area, at the picture's shape.
 void default_window(double ratio, int* w, int* h) {
+    int work_w = 1280, work_h = 1024;
+#ifdef _WIN32
     MONITORINFO info{};
     info.cbSize = sizeof info;
-    int work_w = 1280, work_h = 1024;
     if (GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &info)) {
         work_w = info.rcWork.right - info.rcWork.left;
         work_h = info.rcWork.bottom - info.rcWork.top;
     }
+#else
+    // Before the host starts SDL: video only for this question.
+    if (SDL_InitSubSystem(SDL_INIT_VIDEO)) {
+        SDL_Rect r{};
+        if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &r) && r.w > 0 && r.h > 0) {
+            work_w = r.w;
+            work_h = r.h;
+        }
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    }
+#endif
     int height = std::max(480, static_cast<int>(work_h * 0.8) / 240 * 240);
     int width = static_cast<int>(std::lround(height * ratio));
     if (width > work_w * 9 / 10) {
@@ -279,7 +329,7 @@ void default_window(double ratio, int* w, int* h) {
     *h = height;
 }
 
-std::string texture_folder() { return g_data_dir + "Load\\Textures\\GZLE01"; }
+std::string texture_folder() { return g_data_dir + "Load" BW_SEP "Textures" BW_SEP "GZLE01"; }
 
 // --- the window -------------------------------------------------------------
 
@@ -466,9 +516,13 @@ void set_menu_open(bool open) {
 
 void open_folder(const std::string& path) {
     CreateDirectoryA(path.c_str(), nullptr);
+#ifdef _WIN32
     wchar_t wide[MAX_PATH * 2];
     if (MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wide, MAX_PATH * 2) > 0)
         ShellExecuteW(nullptr, L"open", wide, nullptr, nullptr, SW_SHOWNORMAL);
+#else
+    SDL_OpenURL(("file://" + path).c_str());
+#endif
 }
 
 // Start BlueWake again, with the command line and environment it began with,
@@ -845,6 +899,7 @@ void load_font(SDL_Window* w) {
     auto* atlas = new ImFontAtlas();  // for the life of the process
     atlas->Flags |= ImFontAtlasFlags_NoMouseCursors;
     ImFont* font = nullptr;
+#ifdef _WIN32
     char fonts[MAX_PATH];
     const UINT length = GetWindowsDirectoryA(fonts, MAX_PATH);
     if (length > 0 && length < MAX_PATH - 32) {
@@ -852,6 +907,28 @@ void load_font(SDL_Window* w) {
         if (GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES)
             font = atlas->AddFontFromFileTTF(path.c_str(), std::round(15.0f * scale), nullptr, ranges);
     }
+#else
+    // The desktop's sans-serif font (fontconfig), else a common one.
+    std::vector<std::string> candidates;
+    if (FILE* fc = popen("fc-match -f '%{file}' 'sans-serif:style=Regular:fontformat=TrueType' 2>/dev/null", "r")) {
+        char found[MAX_PATH] = "";
+        if (std::fgets(found, sizeof found, fc) != nullptr && found[0] != '\0')
+            candidates.emplace_back(found);
+        pclose(fc);
+    }
+    for (const char* known : {"/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                              "/usr/share/fonts/liberation/LiberationSans-Regular.ttf"})
+        candidates.emplace_back(known);
+    for (const std::string& path : candidates) {
+        if (font != nullptr)
+            break;
+        const size_t dot = path.rfind('.');
+        const std::string ext = dot == std::string::npos ? "" : path.substr(dot);
+        if ((ext == ".ttf" || ext == ".otf") && GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+            font = atlas->AddFontFromFileTTF(path.c_str(), std::round(15.0f * scale), nullptr, ranges);
+    }
+#endif
     if (font == nullptr) {
         // ImGui's own, at a whole multiple so its pixels stay square.
         scale = std::max(1.0f, std::round(scale));
@@ -1010,7 +1087,32 @@ void draw_hint(SDL_Window* w) {
 }
 
 // Every presented frame, on the main thread, inside Aurora's frame.
+#ifndef _WIN32
+// Linux: the desktop hotkeys from SDL's events (Windows has a keyboard hook in
+// win_entry.c), as the virtual keys bw_settings_key takes.
+bool linux_key_watch(void*, SDL_Event* event) {
+    if (event->type != SDL_EVENT_KEY_DOWN || event->key.repeat)
+        return true;
+    unsigned vk = 0;
+    switch (event->key.scancode) {
+    case SDL_SCANCODE_F1: vk = VK_F1; break;
+    case SDL_SCANCODE_ESCAPE: vk = VK_ESCAPE; break;
+    case SDL_SCANCODE_F9: vk = VK_F9; break;
+    case SDL_SCANCODE_F10: vk = VK_F10; break;
+    case SDL_SCANCODE_F11: vk = VK_F11; break;
+    case SDL_SCANCODE_RETURN: case SDL_SCANCODE_KP_ENTER: vk = VK_RETURN; break;
+    default: return true;
+    }
+    bw_settings_key(vk, (event->key.mod & SDL_KMOD_ALT) != 0);
+    return true;
+}
+#endif
+
 void frame(void*) {
+#ifndef _WIN32
+    static bool key_watch = SDL_AddEventWatch(linux_key_watch, nullptr);
+    (void)key_watch;
+#endif
     // BLUEWAKE_MOUSE_LATENCY=1 (diagnostics): when the game's present runs, just
     // before Aurora collects the window's events (mouse_camera.c logs when the
     // camera takes them).
@@ -1117,6 +1219,11 @@ void save_at_exit() {
 }  // namespace
 
 extern "C" void bw_settings_capture_environment(void) {
+#ifndef _WIN32
+    for (char** e = environ; e != nullptr && *e != nullptr; e++)
+        g_environment.emplace_back(*e);
+    return;
+#else
     wchar_t* block = GetEnvironmentStringsW();
     if (block == nullptr)
         return;
@@ -1125,6 +1232,7 @@ extern "C" void bw_settings_capture_environment(void) {
         end += wcslen(end) + 1;
     g_environment.assign(block, end + 1);
     FreeEnvironmentStringsW(block);
+#endif
 }
 
 extern "C" void bw_settings_load(const char* data_dir) {
@@ -1188,7 +1296,7 @@ extern "C" void bw_settings_apply_launch(void) {
         env_default("BLUEWAKE_OPTIONS", list);
     }
     CreateDirectoryA((g_data_dir + "Load").c_str(), nullptr);
-    CreateDirectoryA((g_data_dir + "Load\\Textures").c_str(), nullptr);
+    CreateDirectoryA((g_data_dir + "Load" BW_SEP "Textures").c_str(), nullptr);
     CreateDirectoryA(texture_folder().c_str(), nullptr);
     if (d.hd_textures)
         env_default("DOL_AURORA_TEXTURE_PACK", texture_folder());
@@ -1252,6 +1360,37 @@ extern "C" void bw_settings_apply_launch(void) {
 extern "C" int bw_settings_finish_restart(void) {
     if (!g_restart_requested)
         return 0;
+#ifndef _WIN32
+    // The same executable, command line (/proc/self/cmdline) and environment.
+    std::vector<std::string> args;
+    if (FILE* f = std::fopen("/proc/self/cmdline", "rb")) {
+        std::string arg;
+        for (int c; (c = std::fgetc(f)) != EOF;) {
+            if (c == '\0') {
+                args.push_back(arg);
+                arg.clear();
+            } else {
+                arg += static_cast<char>(c);
+            }
+        }
+        std::fclose(f);
+    }
+    std::vector<char*> argv, envp;
+    for (auto& a : args)
+        argv.push_back(a.data());
+    argv.push_back(nullptr);
+    for (auto& e : g_environment)
+        envp.push_back(e.data());
+    envp.push_back(nullptr);
+    pid_t pid;
+    if (args.empty() || posix_spawn(&pid, "/proc/self/exe", nullptr, nullptr, argv.data(),
+                                    g_environment.empty() ? environ : envp.data()) != 0) {
+        std::fprintf(stderr, "[linux] restart failed\n");
+        return -1;
+    }
+    std::fprintf(stderr, "[linux] started the new session\n");
+    return 1;
+#else
     wchar_t exe[MAX_PATH * 2];
     if (GetModuleFileNameW(nullptr, exe, MAX_PATH * 2) == 0)
         return -1;
@@ -1268,6 +1407,7 @@ extern "C" int bw_settings_finish_restart(void) {
     CloseHandle(process.hProcess);
     std::fprintf(stderr, "[windows] started the new session\n");
     return 1;
+#endif
 }
 
 extern "C" void bw_settings_install(void) {

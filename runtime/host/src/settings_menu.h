@@ -21,8 +21,8 @@ extern "C" {
 //                                 Application Support/Wind Waker Recomp/
 //                                 settings.ini); none: neither read nor written
 
-#if (defined(__APPLE__) && TARGET_OS_IPHONE) || defined(_WIN32)
-// The iOS app and the Windows host (windows/src/win_settings.cpp) have their own menus.
+#if (defined(__APPLE__) && TARGET_OS_IPHONE) || defined(_WIN32) || defined(BLUEWAKE_LINUX)
+// The iOS app and the Windows and Linux hosts (windows/src/win_settings.cpp) have their own menus.
 static inline void bluewake_settings_load(void) {}
 static inline void bluewake_settings_menu_install(void) {}
 static inline bool bluewake_settings_menu_event(const void* sdl_event) {
